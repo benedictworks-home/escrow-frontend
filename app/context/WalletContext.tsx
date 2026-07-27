@@ -12,6 +12,12 @@ import { Networks, StellarWalletsKit } from "@creit.tech/stellar-wallets-kit";
 import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
 import { NETWORK_PASSPHRASE } from "@/app/lib/contract";
 import { useToast } from "./ToastContext";
+import {
+  persistFreighterState,
+  clearPersistedFreighterState,
+  loadAndValidatePersistedFreighterState,
+  reverifyFreighterState,
+} from "@/app/lib/freighter_connector";
 
 const STORAGE_KEY = "milesto_wallet_connected";
 
@@ -90,11 +96,67 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (localStorage.getItem(STORAGE_KEY) !== "true") return;
+    if (selectedWalletId !== "freighter") {
+      clearPersistedFreighterState();
+    }
+  }, [selectedWalletId]);
 
+  useEffect(() => {
     ensureKitInitialized();
 
     let active = true;
+
+    // Check if there is a valid persisted Freighter state first
+    const persistedFreighter = loadAndValidatePersistedFreighterState();
+    if (persistedFreighter) {
+      reverifyFreighterState().then(async (liveAddress) => {
+        if (!active) return;
+        if (liveAddress) {
+          setAddress(liveAddress);
+          setSelectedWalletId("freighter");
+          localStorage.setItem(STORAGE_KEY, "true");
+          try {
+            const freighterApi = await import("@stellar/freighter-api");
+            const net = await freighterApi.getNetwork();
+            persistFreighterState(liveAddress, net.networkPassphrase || net.network || "TESTNET");
+          } catch (e) {
+            console.error("Failed to update persisted freighter state network", e);
+          }
+          await checkNetwork();
+        } else {
+          clearPersistedFreighterState();
+          // Fallback to standard kit if milesto_wallet_connected is true
+          if (localStorage.getItem(STORAGE_KEY) === "true") {
+            try {
+              StellarWalletsKit.setWallet("freighter");
+              const result = await StellarWalletsKit.getAddress();
+              if (result.address && active) {
+                setAddress(result.address);
+                await checkNetwork();
+              } else {
+                localStorage.removeItem(STORAGE_KEY);
+                setAddress(null);
+              }
+            } catch {
+              localStorage.removeItem(STORAGE_KEY);
+              setAddress(null);
+            }
+          } else {
+            setAddress(null);
+          }
+        }
+      }).catch(() => {
+        if (!active) return;
+        clearPersistedFreighterState();
+        setAddress(null);
+      });
+      return () => {
+        active = false;
+      };
+    }
+
+    if (localStorage.getItem(STORAGE_KEY) !== "true") return;
+
     StellarWalletsKit.getAddress()
       .then(async (result: { address?: string }) => {
         if (!active) return;
@@ -126,6 +188,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         setAddress(result.address);
         await checkNetwork();
         localStorage.setItem(STORAGE_KEY, "true");
+        if (selectedWalletId === "freighter") {
+          try {
+            const freighterApi = await import("@stellar/freighter-api");
+            const net = await freighterApi.getNetwork();
+            persistFreighterState(result.address, net.networkPassphrase || net.network || "TESTNET");
+          } catch (e) {
+            console.error("Failed to persist freighter state network", e);
+          }
+        }
       }
     } catch (e) {
       console.error("Wallet connection failed", e);
@@ -140,6 +211,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       console.error("Wallet disconnect failed", e);
     });
     localStorage.removeItem(STORAGE_KEY);
+    clearPersistedFreighterState();
     setNetworkMismatch(false);
     setAddress(null);
   }, []);

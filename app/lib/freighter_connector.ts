@@ -5,6 +5,7 @@
  */
 
 import type { ToastType } from "@/app/context/ToastContext";
+import { isConnected, getAddress } from "@stellar/freighter-api";
 
 const LOG_PREFIX = "[freighter_connector]";
 
@@ -195,5 +196,106 @@ export async function runFreighterSign<T>(
       return null;
     }
     throw err;
+  }
+}
+
+export interface PersistedFreighterState {
+  version: number;
+  address: string;
+  network: string;
+  connectedAt: number;
+}
+
+export const FREIGHTER_PERSIST_KEY = "freighter_active_address_state";
+
+/**
+ * Serializes the active address and network state for Freighter to sessionStorage.
+ * Treats inputs as public only and does not store secrets.
+ */
+export function persistFreighterState(address: string, network: string): void {
+  if (typeof window === "undefined") return;
+  const payload: PersistedFreighterState = {
+    version: 1,
+    address,
+    network,
+    connectedAt: Date.now(),
+  };
+  try {
+    window.sessionStorage.setItem(FREIGHTER_PERSIST_KEY, JSON.stringify(payload));
+  } catch (err) {
+    console.error(`${LOG_PREFIX} Failed to persist freighter state:`, err);
+  }
+}
+
+/**
+ * Clears the persisted Freighter state from sessionStorage.
+ */
+export function clearPersistedFreighterState(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(FREIGHTER_PERSIST_KEY);
+  } catch (err) {
+    console.error(`${LOG_PREFIX} Failed to clear persisted freighter state:`, err);
+  }
+}
+
+/**
+ * Attempts to deserialize and validate the persisted Freighter state.
+ * Gracefully handles missing, corrupted, or outdated data by falling back to null and clearing the storage.
+ */
+export function loadAndValidatePersistedFreighterState(): PersistedFreighterState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(FREIGHTER_PERSIST_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.version === 1 &&
+      typeof parsed.address === "string" &&
+      parsed.address.startsWith("G") &&
+      parsed.address.length === 56 &&
+      typeof parsed.network === "string" &&
+      typeof parsed.connectedAt === "number"
+    ) {
+      return parsed as PersistedFreighterState;
+    }
+    // Invalid shape/version, clear it and return null
+    window.sessionStorage.removeItem(FREIGHTER_PERSIST_KEY);
+    return null;
+  } catch (err) {
+    console.warn(`${LOG_PREFIX} Failed to load/validate persisted freighter state, clearing:`, err);
+    try {
+      window.sessionStorage.removeItem(FREIGHTER_PERSIST_KEY);
+    } catch {}
+    return null;
+  }
+}
+
+/**
+ * Re-verifies the rehydrated address against Freighter's live API.
+ * Returns the live address if valid and active, or null if the extension is locked,
+ * unauthorized, or has switched.
+ */
+export async function reverifyFreighterState(detector?: () => boolean): Promise<string | null> {
+  if (typeof window === "undefined" || !detectFreighterExtension(detector)) {
+    return null;
+  }
+  try {
+    const connectedResult = await isConnected();
+    if (!connectedResult || !connectedResult.isConnected) {
+      return null;
+    }
+
+    const addressResult = await getAddress();
+    if (!addressResult || !addressResult.address) {
+      return null;
+    }
+
+    return addressResult.address;
+  } catch (err) {
+    console.warn(`${LOG_PREFIX} Freighter reverification failed:`, err);
+    return null;
   }
 }
